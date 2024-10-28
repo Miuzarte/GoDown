@@ -7,32 +7,34 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/vbauerster/mpb/v8"
 )
 
-const (
-	BS = 1024 * 1024 * 16
-)
-
 var (
+	autoRetry = 3                // 每个线程的自动重试次数
 	threadNum = 6                // 线程数
 	blockSize = 1024 * 1024 * 16 // 动态多线程块大小
 )
 
+var (
+	ErrUnknownSize       = fmt.Errorf("unknown file size")
+	ErrNothingToDownload = fmt.Errorf("nothing to download")
+)
+
 type Job struct {
-	Url      string
-	fileName string
+	Url          string
+	fileName     string
+	acceptRanges bool
+	size         int
+
 	filePath string
-	size     int
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -57,23 +59,34 @@ type Block struct {
 }
 
 func (j Job) String() string {
-	return fmt.Sprintf("fileName: %s, size: %s, Url: %s", j.fileName, FormatBytes(j.size), j.Url)
+	var size string
+	if j.size == -1 {
+		size = "[unknown]"
+	} else {
+		size = FormatBytes(j.size)
+	}
+	return fmt.Sprintf("fileName: %s, size: %s, Url: %s", j.fileName, size, j.Url)
 }
 
 func (j *Job) init() error {
 	j.ctx, j.cancel = context.WithCancel(context.Background())
 	j.progress = j.newProgressWithCtx()
 
-	if j.size > 0 {
+	if j.fileName != "" {
 		return nil
 	}
 
 	err := j.fetchHeader()
-	if err != nil {
-		return err
-	}
+	switch err {
+	case nil:
+		j.splitBlocks()
 
-	j.splitBlocks()
+	case ErrUnknownSize:
+
+	default:
+		return err
+
+	}
 
 	return j.createFile()
 }
@@ -82,12 +95,18 @@ func (j *Job) init() error {
 func (j *Job) fetchHeader() error {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
-		time.Second*5, // 5s 拿 header
+		time.Second*30,
 	)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "HEAD", j.Url, nil)
-	if err != nil {
+	switch err {
+	case context.DeadlineExceeded:
+		return fmt.Errorf("header request timeout")
+	// case context.Canceled:
+	case nil:
+		break
+	default:
 		return err
 	}
 
@@ -103,18 +122,30 @@ func (j *Job) fetchHeader() error {
 	}
 	defer resp.Body.Close()
 
-	// fmt.Println("headers:")
-	// for k, v := range resp.Header {
-	// 	fmt.Printf("k: %v, v: %v\n", k, v)
-	// }
+	// PrintHeader(resp.Header)
+	log.Debug(resp.Status)
 
-	j.size = int(resp.ContentLength)
-	if j.size <= 0 {
-		return fmt.Errorf("failed to get file size")
+	j.Url = resp.Request.URL.String()
+
+	filename := strings.Split(resp.Header.Get("Content-Disposition"), ";")
+	for _, fn := range filename {
+		if strings.Contains(fn, "filename=") {
+			j.fileName = strings.Split(fn, "filename=")[1]
+			break
+		}
 	}
-	j.fileName = resp.Header.Get("Content-Disposition")
 	if j.fileName == "" { // 取 URL 最后一段
 		j.fileName = path.Base(resp.Request.URL.Path)
+	}
+
+	j.acceptRanges = strings.Contains(resp.Header.Get("Accept-Ranges"), "bytes")
+
+	j.size = int(resp.ContentLength)
+	switch j.size {
+	case -1:
+		return ErrUnknownSize
+	case 0:
+		return ErrNothingToDownload
 	}
 
 	return nil
@@ -172,40 +203,21 @@ S:
 	if err != nil {
 		log.Fatalf("Failed to init job: %v", err)
 	}
-	j.setupChannels()
-	defer j.Clean()
+	log.Info(j)
 
-	go func() {
-		signal.Notify(sigChan, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
-		for {
-			select {
-			case <-sigChan:
-				// 外部取消
-				j.cancel()
-				signal.Stop(sigChan)
-				close(sigChan)
-				return
-			case <-j.ctx.Done():
-				// 等待重试
-				continue
-			}
-		}
-	}()
+	go catchSigs(j.ctx, j.cancel) // 捕获 Ctrl+C
+	defer j.Clean()               // 退出时清理
 
 	wg := &sync.WaitGroup{}
-	wg.Add(len(j.Blocks))
-	go func() {
-		err := j.MergeIntoFileSyncSeq(wg)
-		switch err {
-		case nil:
-		case context.Canceled:
-		default:
-			j.cancel()
+	if j.acceptRanges {
+		err = j.DownloadMultiThread(wg)
+	} else {
+		if j.size == -1 {
+			log.Info("Unknown file size, downloading in single thread")
+		} else {
+			log.Info("Server does not support range requests, downloading in single thread")
 		}
-	}()
-	err = j.DownloadIntoRam()
-	if err != nil && err != context.Canceled && strings.Contains(err.Error(), "context canceled") {
-		err = context.Canceled
+		err = j.DownloadSingleThread(wg)
 	}
 	switch err {
 	case nil:
@@ -224,6 +236,7 @@ S:
 		if strings.TrimSpace(strings.ToLower(input)) == "y" {
 			goto S
 		}
+
 	}
 
 }
@@ -235,11 +248,58 @@ func (j *Job) Clean() {
 	if err != nil {
 		log.Fatalf("Failed to get file info: %v", err)
 	}
-	if fileInfo.Size() != int64(j.size) { // 未完成下载
+	if j.size != -1 && fileInfo.Size() != int64(j.size) { // 未完成下载
 		os.Remove(j.filePath)
 	} else { // 打印路径
 		log.Infof("Downloaded file: %s", Hyperlink(j.filePath))
 	}
+}
+
+func (j *Job) DownloadMultiThread(wg *sync.WaitGroup) (err error) {
+	wg.Add(len(j.Blocks))
+	j.setupChannels()
+	go func() {
+		err := j.MergeIntoFileSyncSeq(wg)
+		switch err {
+		case nil:
+		case context.Canceled:
+		default:
+			j.cancel()
+		}
+	}()
+	err = j.DownloadIntoRam()
+	if err != nil && err != context.Canceled && strings.Contains(err.Error(), "context canceled") {
+		err = context.Canceled // http 会包装 context.Canceled
+	}
+	return
+}
+
+func (j *Job) DownloadSingleThread(wg *sync.WaitGroup) (err error) {
+	wg.Add(1)
+	defer wg.Done()
+
+	req, err := http.NewRequestWithContext(j.ctx, "GET", j.Url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var src io.ReadCloser
+	if showThreadProgressBar {
+		src = j.newUnknownSizeBar().ProxyReader(resp.Body)
+	} else {
+		src = resp.Body
+	}
+	_, err = io.Copy(j.fs, src)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // DownloadIntoRam 下载到内存

@@ -54,6 +54,17 @@ func (j *Job) newThreadBar(block *Block) *mpb.Bar {
 	return bar
 }
 
+// newUnknownSizeBar 未知文件大小进度条
+func (j *Job) newUnknownSizeBar() *mpb.Bar {
+	bar := j.progress.New(0,
+		BarStyleMain,
+		mpb.PrependDecorators(
+			Spinner,
+		),
+	)
+	return bar
+}
+
 var RefreshRate = mpb.WithRefreshRate(100 * time.Millisecond)
 var BarStyleMain = mpb.BarStyle().Lbound("⡇").Filler("⣿").Rbound("⢸").Tip("⡇", "⣇", "⡧", "⡗", "⡏").Padding("+")
 var BarStyleSecondary = mpb.BarStyle().Lbound("[").Filler("=").Rbound("]").Tip(">").Padding(" ")

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func FormatBytes(bytes int) string {
@@ -54,6 +58,30 @@ func GetUniqueFilePath(path string) string {
 
 func Hyperlink(link string) string {
 	return fmt.Sprintf("\x1b]8;;file://%s\x1b\\%s\x1b]8;;\x1b\\", link, link)
+}
+
+func PrintHeader(header http.Header) {
+	fmt.Println("headers:")
+	for k, v := range header {
+		fmt.Printf("k: %v, v: %v\n", k, v)
+	}
+}
+
+func catchSigs(ctx context.Context, cancel context.CancelFunc) {
+	signal.Notify(sigChan, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	for {
+		select {
+		case <-sigChan:
+			// 外部取消
+			cancel()
+			signal.Stop(sigChan)
+			close(sigChan)
+			return
+		case <-ctx.Done():
+			// 等待重试
+			continue
+		}
+	}
 }
 
 type Limiter struct {

@@ -6,7 +6,7 @@ Multithread downloader driven by Go
 
 ## Features
 
-- **Download in parallel but write in sequentially, HDD friendly**
+- **Download in parallel but write sequentially, HDD friendly**
 - Auto identify downloads folder (Windows only)
 - Fancy and useless progress bar
 - Output path as a hyperlink

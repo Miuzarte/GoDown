@@ -9,8 +9,6 @@ import (
 )
 
 var (
-	autoRetry = 3 // 每个线程的自动重试次数
-
 	memUsage float64 = 1024 * 1024 * 1024 // 内存使用量, 1GB
 
 	showTotalProgressBar  = true // 显示总进度条
@@ -19,8 +17,7 @@ var (
 
 var (
 	DownloadsFolder string
-
-	ProxyURL *url.URL
+	ProxyURL        *url.URL
 
 	Header = http.Header{
 		"Accept":        {"*/*"},
@@ -28,7 +25,6 @@ var (
 		"Connection":    {"keep-alive"},
 		"User-Agent":    {"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"},
 	}
-
 	// Client 全局自定义 Client
 	Client = NewClient()
 )
@@ -62,8 +58,6 @@ func main() {
 	}
 
 	j := &Job{Url: flag.Arg(0)}
-	j.init()
-	log.Info(j)
 	j.Start()
 
 }
