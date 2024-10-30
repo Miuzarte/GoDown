@@ -31,7 +31,9 @@ var (
 
 func init() {
 	log.SetFormatter(&LogFormat{})
+}
 
+func Init() {
 	proxy := flag.String("p", "", "Proxy address")
 	logLevel := flag.String("l", "info", "Log level: trace, debug, info, warn/warning, error, fatal, panic")
 	flag.Parse()
@@ -53,6 +55,8 @@ func init() {
 }
 
 func main() {
+	Init()
+
 	if len(flag.Args()) < 1 {
 		log.Fatalf("Usage: godown.exe <URL> [-l <log level>] [-p <proxy>]")
 	}

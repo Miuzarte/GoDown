@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,6 +18,11 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
+const (
+	Provider_Normal = iota
+	Provider_Mega
+)
+
 var (
 	autoRetry = 3                // 每个线程的自动重试次数
 	threadNum = 6                // 线程数
@@ -26,10 +32,12 @@ var (
 var (
 	ErrUnknownSize       = fmt.Errorf("unknown file size")
 	ErrNothingToDownload = fmt.Errorf("nothing to download")
+	ErrNotAcceptRanges   = fmt.Errorf("server does not support range requests")
 )
 
 type Job struct {
 	Url          string
+	finalUrl     string
 	fileName     string
 	acceptRanges bool
 	size         int
@@ -42,10 +50,17 @@ type Job struct {
 	fs       *os.File
 	Blocks   Blocks
 
+	mega *mega
+
 	// 放结构体里显示顺序全乱, 疑难杂症
 	// totalBar   *mpb.Bar
 	// writingBar *mpb.Bar
 
+}
+
+type mega struct {
+	id  string
+	key string
 }
 
 type Blocks []*Block
@@ -65,7 +80,7 @@ func (j Job) String() string {
 	} else {
 		size = FormatBytes(j.size)
 	}
-	return fmt.Sprintf("fileName: %s, size: %s, Url: %s", j.fileName, size, j.Url)
+	return fmt.Sprintf("fileName: %s, size: %s, url: %s", j.fileName, size, j.finalUrl)
 }
 
 func (j *Job) init() error {
@@ -76,19 +91,18 @@ func (j *Job) init() error {
 		return nil
 	}
 
-	err := j.fetchHeader()
-	switch err {
-	case nil:
-		j.splitBlocks()
-
-	case ErrUnknownSize:
-
-	default:
+	u, err := url.Parse(j.Url)
+	if err != nil {
 		return err
-
+	}
+	if u.Host == "mega.nz" || u.Host == "mega.co.nz" {
+		j.mega = &mega{
+			id:  path.Base(u.Path),
+			key: u.Fragment,
+		}
 	}
 
-	return j.createFile()
+	return j.fetchHeader()
 }
 
 // fetchHeader 获取文件头信息
@@ -121,11 +135,9 @@ func (j *Job) fetchHeader() error {
 		return err
 	}
 	defer resp.Body.Close()
-
+	j.finalUrl = resp.Request.URL.String()
 	// PrintHeader(resp.Header)
 	log.Debug(resp.Status)
-
-	j.Url = resp.Request.URL.String()
 
 	filename := strings.Split(resp.Header.Get("Content-Disposition"), ";")
 	for _, fn := range filename {
@@ -138,14 +150,17 @@ func (j *Job) fetchHeader() error {
 		j.fileName = path.Base(resp.Request.URL.Path)
 	}
 
-	j.acceptRanges = strings.Contains(resp.Header.Get("Accept-Ranges"), "bytes")
-
 	j.size = int(resp.ContentLength)
 	switch j.size {
 	case -1:
 		return ErrUnknownSize
 	case 0:
 		return ErrNothingToDownload
+	}
+
+	j.acceptRanges = strings.Contains(resp.Header.Get("Accept-Ranges"), "bytes")
+	if !j.acceptRanges {
+		return ErrNotAcceptRanges
 	}
 
 	return nil
@@ -172,18 +187,17 @@ func (j *Job) splitBlocks() {
 }
 
 // createFile 创建文件
-func (j *Job) createFile() error {
+func (j *Job) createFile() {
 	if j.fs != nil {
-		return nil
+		return
 	}
 
 	j.filePath = GetUniqueFilePath(filepath.Join(DownloadsFolder, j.fileName))
 	fs, err := os.Create(j.filePath)
 	if err != nil {
-		return err
+		log.Panic(err)
 	}
 	j.fs = fs
-	return nil
 }
 
 // setupChannels 初始化块信号
@@ -195,14 +209,21 @@ func (j *Job) setupChannels() {
 	}
 }
 
-var sigChan = make(chan os.Signal, 1)
-
 func (j *Job) Start() {
 S:
 	err := j.init()
-	if err != nil {
+	switch err {
+	case nil:
+		j.splitBlocks()
+
+	case ErrUnknownSize:
+	case ErrNotAcceptRanges:
+
+	default:
 		log.Fatalf("Failed to init job: %v", err)
+
 	}
+	j.createFile()
 	log.Info(j)
 
 	go catchSigs(j.ctx, j.cancel) // 捕获 Ctrl+C
@@ -278,7 +299,7 @@ func (j *Job) DownloadSingleThread(wg *sync.WaitGroup) (err error) {
 	wg.Add(1)
 	defer wg.Done()
 
-	req, err := http.NewRequestWithContext(j.ctx, "GET", j.Url, nil)
+	req, err := http.NewRequestWithContext(j.ctx, "GET", j.finalUrl, nil)
 	if err != nil {
 		return err
 	}
@@ -365,7 +386,7 @@ func (j *Job) DownloadIntoRam() error {
 
 // downloadBlock 下载块
 func (j *Job) downloadBlock(block *Block) error {
-	req, err := http.NewRequestWithContext(j.ctx, "GET", j.Url, nil)
+	req, err := http.NewRequestWithContext(j.ctx, "GET", j.finalUrl, nil)
 	if err != nil {
 		return err
 	}

@@ -67,6 +67,8 @@ func PrintHeader(header http.Header) {
 	}
 }
 
+var sigChan = make(chan os.Signal, 1)
+
 func catchSigs(ctx context.Context, cancel context.CancelFunc) {
 	signal.Notify(sigChan, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	for {
