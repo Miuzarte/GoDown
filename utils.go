@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -65,6 +67,22 @@ func PrintHeader(header http.Header) {
 	for k, v := range header {
 		fmt.Printf("k: %v, v: %v\n", k, v)
 	}
+}
+
+func base64UrlDecode(str string) ([]byte, error) {
+	if str == "" {
+		return nil, errors.New("empty input")
+	}
+
+	str = strings.ReplaceAll(str, "-", "+")
+	str = strings.ReplaceAll(str, "_", "/")
+
+	eqs := (len(str) * 3) & 0x03
+	for i := 0; i < eqs; i++ {
+		str += "="
+	}
+
+	return base64.StdEncoding.DecodeString(str)
 }
 
 var sigChan = make(chan os.Signal, 1)

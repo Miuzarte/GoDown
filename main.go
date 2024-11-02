@@ -31,22 +31,28 @@ var (
 
 func init() {
 	log.SetFormatter(&LogFormat{})
+	log.SetLevel(log.TraceLevel)
 }
 
 func Init() {
-	proxy := flag.String("p", "", "Proxy address")
-	logLevel := flag.String("l", "info", "Log level: trace, debug, info, warn/warning, error, fatal, panic")
+	p := flag.String("p", "", "Proxy address")
+	t := flag.Int("t", 6, "Number of threads, default 6")
+	bs := flag.Int("bs", 1024*1024*16, "Block size， default 16MiB")
+	ll := flag.String("ll", "info", "Log level: trace, debug, info, warn/warning, error, fatal, panic")
 	flag.Parse()
 
-	if *proxy != "" {
-		proxyURL, err := url.Parse(*proxy)
+	if *p != "" {
+		proxyURL, err := url.Parse(*p)
 		if err != nil {
 			log.Fatalf("Failed to parse proxy URL: %v", err)
 		}
 		ProxyURL = proxyURL
 	}
 
-	l, err := log.ParseLevel(*logLevel)
+	threadNum = *t
+	blockSize = *bs
+
+	l, err := log.ParseLevel(*ll)
 	if err != nil {
 		log.Fatalf("Failed to parse log level: %v", err)
 	}
@@ -57,11 +63,12 @@ func Init() {
 func main() {
 	Init()
 
-	if len(flag.Args()) < 1 {
-		log.Fatalf("Usage: godown.exe <URL> [-l <log level>] [-p <proxy>]")
+	args := flag.Args()
+	if len(args) < 1 || args[0] == "" {
+		log.Fatalf("Usage: godown <URL> [-p <proxy>] [-t <threadNum>] [-bs blockSize] [-ll <log level>] ")
 	}
 
-	j := &Job{Url: flag.Arg(0)}
+	j := &Job{Url: args[0]}
 	j.Start()
 
 }
