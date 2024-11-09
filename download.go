@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	Provider_Normal = iota
-	Provider_Mega
+	SRC_NORMAL = iota
+	SRC_MEGA
 )
 
 var (

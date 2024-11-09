@@ -4,15 +4,9 @@ import (
 	"flag"
 	"net/http"
 	"net/url"
+	"os"
 
 	log "github.com/sirupsen/logrus"
-)
-
-var (
-	memUsage float64 = 1024 * 1024 * 1024 // 内存使用量, 1GB
-
-	showTotalProgressBar  = true // 显示总进度条
-	showThreadProgressBar = true // 显示线程进度条 (花里胡哨! )
 )
 
 var (
@@ -29,17 +23,33 @@ var (
 	Client = NewClient()
 )
 
+var (
+	showTotalProgressBar  bool // 显示总进度条
+	showThreadProgressBar bool // 显示线程进度条 (花里胡哨! )
+)
+
 func init() {
 	log.SetFormatter(&LogFormat{})
 	log.SetLevel(log.TraceLevel)
 }
 
 func Init() {
+	dir := flag.String("d", "", "Download directory")
 	p := flag.String("p", "", "Proxy address")
-	t := flag.Int("t", 6, "Number of threads, default 6")
-	bs := flag.Int("bs", 1024*1024*16, "Block size， default 16MiB")
+	t := flag.Int("t", 6, "Number of threads")
+	bs := flag.Int("bs", 1024*1024*16, "Block size")
 	ll := flag.String("ll", "info", "Log level: trace, debug, info, warn/warning, error, fatal, panic")
+	pbt := flag.Bool("pbt", true, "Show total progress bar")
+	pbs := flag.Bool("pbs", true, "Show thread progress bar")
 	flag.Parse()
+
+	if *dir != "" {
+		DownloadsFolder = *dir
+	} else {
+		if DownloadsFolder = GetDownloadsFolder(); DownloadsFolder == "" {
+			log.Fatalf("Failed to get downloads folder, please set it manually")
+		}
+	}
 
 	if *p != "" {
 		proxyURL, err := url.Parse(*p)
@@ -58,6 +68,8 @@ func Init() {
 	}
 	log.SetLevel(l)
 
+	showTotalProgressBar = *pbt
+	showThreadProgressBar = *pbs
 }
 
 func main() {
@@ -65,7 +77,8 @@ func main() {
 
 	args := flag.Args()
 	if len(args) < 1 || args[0] == "" {
-		log.Fatalf("Usage: godown <URL> [-p <proxy>] [-t <threadNum>] [-bs blockSize] [-ll <log level>] ")
+		flag.Usage()
+		os.Exit(1)
 	}
 
 	j := &Job{Url: args[0]}

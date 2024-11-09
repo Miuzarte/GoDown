@@ -31,7 +31,7 @@ func DownloadMegaPublicFile(link string, dst io.Writer) error {
 
 	l := parseLink(link)
 	if l == nil {
-		return fmt.Errorf("invalid link: %d", link)
+		return fmt.Errorf("invalid link: %s", link)
 	}
 
 	switch l.Type {

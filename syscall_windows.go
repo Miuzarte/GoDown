@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"syscall"
 	"unsafe"
+
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -19,6 +21,14 @@ var (
 	SHGetKnownFolderPathFunc = shell32Dll.NewProc("SHGetKnownFolderPath")
 	CoTaskMemFreeFunc        = ole32Dll.NewProc("CoTaskMemFree")
 )
+
+// var memUsage float64 = 1024 * 1024 * 1024 // 内存使用量, 1GB
+
+func GetMemoryStatus() *MEMORYSTATUSEX {
+	memStatus := &MEMORYSTATUSEX{}
+	GlobalMemoryStatusEx(memStatus)
+	return memStatus
+}
 
 func GlobalMemoryStatusEx(memStatus *MEMORYSTATUSEX) (err error) {
 	defer syscall.FreeLibrary(syscall.Handle(Kernel32Dll.Handle()))
@@ -67,6 +77,18 @@ func (m MEMORYSTATUSEX) String() string {
 
 func (m *MEMORYSTATUSEX) Init() {
 	m.length = 64
+}
+
+func GetDownloadsFolder() string {
+	// ::{374DE290-123F-4565-9164-39C4925E467B}
+	downloadsClsid := syscall.GUID{Data1: 0x374DE290, Data2: 0x123F, Data3: 0x4565, Data4: [8]byte{0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B}}
+	var pszPath uintptr
+	err := SHGetKnownFolderPath(&downloadsClsid, 0, 0, &pszPath)
+	if err != nil {
+		log.Fatalf("Failed to get downloads folder: %v", err)
+	}
+	defer CoTaskMemFree(pszPath)
+	return syscall.UTF16ToString((*[syscall.MAX_PATH]uint16)(unsafe.Pointer(pszPath))[:])
 }
 
 func SHGetKnownFolderPath(rfid *syscall.GUID, dwFlags uint32, hToken syscall.Handle, pszPath *uintptr) (err error) {
