@@ -66,6 +66,7 @@ type mega struct {
 type Blocks []*Block
 
 type Block struct {
+	index   int
 	start   int
 	end     int
 	Done    chan bool // 同步顺序写入的信号
@@ -180,6 +181,7 @@ func (j *Job) splitBlocks() {
 			end = j.size - 1
 		}
 		j.Blocks[i] = &Block{
+			index: i,
 			start: start,
 			end:   end,
 		}
@@ -229,6 +231,7 @@ S:
 	go catchSigs(j.ctx, j.cancel) // 捕获 Ctrl+C
 	defer j.Clean()               // 退出时清理
 
+	timeStart := time.Now()
 	wg := &sync.WaitGroup{}
 	if j.acceptRanges {
 		err = j.DownloadMultiThread(wg)
@@ -243,7 +246,9 @@ S:
 	switch err {
 	case nil:
 		wg.Wait()
+		timeEnd := time.Since(timeStart)
 		<-time.After(time.Millisecond * 400) // 等待进度条移除
+		log.Infof("Downloaded in %v", timeEnd)
 	case context.Canceled:
 		log.Warn("Download canceled")
 

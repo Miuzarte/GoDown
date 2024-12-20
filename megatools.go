@@ -26,20 +26,25 @@ const (
 	maxSleepTime = 5 * time.Second       // for retries
 )
 
-func DownloadMegaPublicFile(link string, dst io.Writer) error {
+func ExportMegaLink(link string) (decryptMw func(io.Reader) io.Reader, err error) {
 	s := NewMegaSession()
 
 	l := parseLink(link)
 	if l == nil {
-		return fmt.Errorf("invalid link: %s", link)
+		return nil, fmt.Errorf("invalid link: %s", link)
 	}
 
 	switch l.Type {
 	case LINK_FILE:
-		return s.Download(dst, l.Handle, l.Key)
+		params, err := s.prepareDownload(l.Handle, l.Key)
+		if err != nil {
+			return nil, err
+		}
+		return params.Export()
+
 	case LINK_FOLDER:
 		panic("Not implemented")
-		return s.Download(dst, l.Handle, l.Key, l.Specific)
+		// return s.Download(dst, l.Handle, l.Key, l.Specific)
 	default:
 		panic("unreachable")
 	}
@@ -54,29 +59,31 @@ type MegaSession struct {
 	sn int64 // Sequence number, 自增
 	// sid string
 	// rid string
-	// apiURLParams map[string]string
+	apiURLParams map[string]string
 	// passwordSaltV2 string
 	// passwordKey []byte
 	// passwordKeySave []byte
-	// masterKey []byte
+	masterKey []byte
 	// rsaKey RSAKey
 	// userHandle string
 	// userName string
 	// userEmail string
-	// shareKeys map[string]string
+	shareKeys map[string]string
 	// fsNodes []FSNode
 	// statusCallback
 	// statusUserdata interface{}
 	// lastRefresh int64
 	// createPreview bool
 	// resumeEnabled bool
+	skMap map[string]string
 
 	apiMu sync.Mutex // 序列化 api 请求
 }
 
 func NewMegaSession() *MegaSession {
 	return &MegaSession{
-		sn: time.Now().Unix(),
+		sn:           time.Now().Unix(),
+		apiURLParams: make(map[string]string),
 	}
 }
 
@@ -85,27 +92,33 @@ type MegaDownloadDataParams struct {
 	nodeName    string
 	nodeSize    uint64
 	aesKey      []byte
-	metaMacXor  []byte // 计算文件 MAC 用, 未实现
 	nonce       []byte
+	// metaMacXor  []byte // 计算文件 MAC 用, 不实现
 }
 
-func (s *MegaSession) Download(dst io.Writer, handle, key string, specific ...string) error {
-	if len(specific) > 0 {
-		panic("Not implemented")
-	}
-	params, err := s.prepareDownload(handle, key)
+// Export 导出解密中间件
+func (p *MegaDownloadDataParams) Export() (decryptMw func(io.Reader) io.Reader, err error) {
+	block, err := aes.NewCipher(p.aesKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return s.downloadData(params, dst)
+	return func(r io.Reader) io.Reader {
+		return cipher.StreamReader{
+			S: cipher.NewCTR(
+				block,
+				slices.Concat(p.nonce, make([]byte, 8)),
+			),
+			R: r,
+		}
+	}, nil
 }
 
 type MegaDownloadReq [1]struct {
 	Cmd string `json:"a"`
 	G   int    `json:"g"`
 	SSL int    `json:"ssl,omitempty"`
-	P   string `json:"p,omitempty"`
-	N   string `json:"n,omitempty"` // hash
+	P   string `json:"p,omitempty"` // handle for file share
+	N   string `json:"n,omitempty"` // hash for folder share
 }
 
 type MegaDownloadResp [1]struct {
@@ -156,6 +169,9 @@ func (s *MegaSession) prepareDownload(handle, key string) (*MegaDownloadDataPara
 	}
 
 	// 解码节点密钥
+	// if strings.Contains(key, ":") {
+	// 	key = strings.Split(key, ":")[1]
+	// }
 	urlKey, err := base64UrlDecode(key)
 	if err != nil {
 		return nil, err
@@ -180,31 +196,9 @@ func (s *MegaSession) prepareDownload(handle, key string) (*MegaDownloadDataPara
 		nodeName:    attr.Name,
 		nodeSize:    size,
 		aesKey:      aesKey,
-		metaMacXor:  metaMacXor,
 		nonce:       nonce,
+		// metaMacXor:  metaMacXor,
 	}, nil
-}
-
-func (s *MegaSession) downloadData(params *MegaDownloadDataParams, dst io.Writer) error {
-	block, err := aes.NewCipher(params.aesKey)
-	if err != nil {
-		return err
-	}
-	aesCtr := cipher.NewCTR(block, slices.Concat(params.nonce, make([]byte, 8)))
-
-	req, err := http.NewRequest("GET", params.downloadUrl, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := Client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	io.Copy(dst, cipher.StreamReader{S: aesCtr, R: resp.Body})
-
-	return nil
 }
 
 type FileAttr struct {
@@ -287,6 +281,9 @@ func (s *MegaSession) apiRequest(req []byte) (resp []byte, err error) {
 	// if s.sid != "" {
 	// 	url += "&sid=" + s.sid
 	// }
+	for k, v := range s.apiURLParams {
+		url += "&" + k + "=" + v
+	}
 
 	var request *http.Request
 	var response *http.Response
@@ -322,7 +319,7 @@ func (s *MegaSession) apiRequest(req []byte) (resp []byte, err error) {
 		}
 		log.Debug("API response: ", string(resp))
 
-		if bytes.HasPrefix(resp, []byte("[")) || bytes.HasPrefix(resp, []byte("-")) {
+		if !bytes.HasPrefix(resp, []byte("[")) && !bytes.HasPrefix(resp, []byte("-")) {
 			return nil, ErrBadResp
 		}
 
@@ -422,4 +419,107 @@ func parseLink(url string) *MegaLink {
 		}
 	}
 	return nil
+}
+
+type FilesMsg [1]struct {
+	Cmd string `json:"a"`
+	C   int    `json:"c"`
+}
+
+const (
+	MEGA_NODE_FILE    = 0
+	MEGA_NODE_FOLDER  = 1
+	MEGA_NODE_ROOT    = 2
+	MEGA_NODE_INBOX   = 3
+	MEGA_NODE_TRASH   = 4
+	MEGA_NODE_NETWORK = 9
+	MEGA_NODE_CONTACT = 8
+)
+
+type FSNode struct {
+	Hash   string `json:"h"`
+	Parent string `json:"p"`
+	User   string `json:"u"`
+	T      int    `json:"t"`
+	Attr   string `json:"a"`
+	Key    string `json:"k"`
+	Ts     int64  `json:"ts"`
+	SUser  string `json:"su"`
+	SKey   string `json:"sk"`
+	Size   int64  `json:"s"`
+}
+
+type FilesResp [1]struct {
+	F []FSNode `json:"f"`
+
+	Ok []struct {
+		Hash string `json:"h"`
+		Key  string `json:"k"`
+	} `json:"ok"`
+
+	S []struct {
+		Hash string `json:"h"`
+		User string `json:"u"`
+	} `json:"s"`
+	User []struct {
+		User  string `json:"u"`
+		C     int    `json:"c"`
+		Email string `json:"m"`
+	} `json:"u"`
+	Sn string `json:"sn"`
+}
+
+func (s *MegaSession) OpenFolder(handle, key, specific string) ([]FSNode, error) {
+
+	return nil, nil
+}
+
+type NodeMeta struct {
+	key     []byte
+	compkey []byte
+	iv      []byte
+	mac     []byte
+}
+
+// Mega filesystem object
+type MegaFS struct {
+	root   *Node
+	trash  *Node
+	inbox  *Node
+	sroots []*Node
+	lookup map[string]*Node
+	skmap  map[string]string
+	mutex  sync.Mutex
+}
+
+// Filesystem node
+type Node struct {
+	fs       *MegaFS
+	name     string
+	hash     string
+	parent   *Node
+	children []*Node
+	ntype    int
+	size     int64
+	ts       time.Time
+	meta     NodeMeta
+}
+
+func bytes2u32s(b []byte) ([]uint32, error) {
+	length := len(b) + 3
+	a := make([]uint32, length/4)
+	buf := bytes.NewBuffer(b)
+	for i := range a {
+		err := binary.Read(buf, binary.BigEndian, &a[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return a, nil
+}
+
+func (s *MegaSession) parseFSNode(item FSNode) (*MegaDownloadDataParams, error) {
+
+	return nil, nil
 }

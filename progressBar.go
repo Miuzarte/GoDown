@@ -50,7 +50,7 @@ func (j *Job) newThreadBar(block *Block) *mpb.Bar {
 		),
 		mpb.BarRemoveOnComplete(),
 	)
-	bar.SetPriority(2)
+	bar.SetPriority(2 + block.index)
 	return bar
 }
 
